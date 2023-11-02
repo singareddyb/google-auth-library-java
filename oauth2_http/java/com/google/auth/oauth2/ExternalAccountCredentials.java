@@ -31,6 +31,7 @@
 
 package com.google.auth.oauth2;
 
+import java.io.Serializable;
 import static com.google.common.base.Preconditions.checkNotNull;
 
 import com.google.api.client.json.GenericJson;
@@ -68,7 +69,7 @@ public abstract class ExternalAccountCredentials extends GoogleCredentials
     implements QuotaProjectIdProvider {
 
   /** Base credential source class. Dictates the retrieval method of the external credential. */
-  abstract static class CredentialSource {
+  abstract static class CredentialSource implements Serializable {
 
     CredentialSource(Map<String, Object> credentialSourceMap) {
       checkNotNull(credentialSourceMap);
@@ -668,7 +669,7 @@ public abstract class ExternalAccountCredentials extends GoogleCredentials
    * }
    * </pre>
    */
-  static final class ServiceAccountImpersonationOptions {
+  static final class ServiceAccountImpersonationOptions implements Serializable {
     private static final int DEFAULT_TOKEN_LIFETIME_SECONDS = 3600;
     private static final int MAXIMUM_TOKEN_LIFETIME_SECONDS = 43200;
     private static final int MINIMUM_TOKEN_LIFETIME_SECONDS = 600;

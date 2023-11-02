@@ -1,4 +1,8 @@
 /*
+  Origin: https://github.com/googleapis/google-auth-library-java/blob/46720b0cf06b12cee538990d29f1738e0b99893e/oauth2_http/java/com/google/auth/oauth2/AwsCredentials.java
+ */
+
+/*
  * Copyright 2021 Google LLC
  *
  * Redistribution and use in source and binary forms, with or without
@@ -41,6 +45,7 @@ import com.google.api.client.http.HttpResponse;
 import com.google.api.client.json.GenericJson;
 import com.google.api.client.json.JsonParser;
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ImmutableList;
 import java.io.IOException;
 import java.io.UnsupportedEncodingException;
 import java.net.MalformedURLException;
@@ -62,9 +67,19 @@ import javax.annotation.Nullable;
  */
 public class AwsCredentials extends ExternalAccountCredentials {
 
+  // Supported environment variables.
+  static final String AWS_REGION = "AWS_REGION";
+  static final String AWS_DEFAULT_REGION = "AWS_DEFAULT_REGION";
+  static final String AWS_ACCESS_KEY_ID = "AWS_ACCESS_KEY_ID";
+  static final String AWS_SECRET_ACCESS_KEY = "AWS_SECRET_ACCESS_KEY";
+  static final String AWS_SESSION_TOKEN = "AWS_SESSION_TOKEN";
+
   static final String AWS_IMDSV2_SESSION_TOKEN_HEADER = "x-aws-ec2-metadata-token";
   static final String AWS_IMDSV2_SESSION_TOKEN_TTL_HEADER = "x-aws-ec2-metadata-token-ttl-seconds";
   static final String AWS_IMDSV2_SESSION_TOKEN_TTL = "300";
+
+  static final String AWS_CONTAINER_CREDENTIALS_RELATIVE_URI = "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI";
+  static final String AWS_CONTAINER_CREDENTIALS_HOST = "http://169.254.170.2";
 
   /**
    * The AWS credential source. Stores data required to retrieve the AWS credential from the AWS
@@ -181,7 +196,10 @@ public class AwsCredentials extends ExternalAccountCredentials {
 
   @Override
   public String retrieveSubjectToken() throws IOException {
-    Map<String, Object> metadataRequestHeaders = createMetadataRequestHeaders(awsCredentialSource);
+    Map<String, Object> metadataRequestHeaders = new HashMap<>();
+    if (shouldUseMetadataServer()) {
+      metadataRequestHeaders = createMetadataRequestHeaders(awsCredentialSource);
+    }
 
     // The targeted region is required to generate the signed request. The regional
     // endpoint must also be used.
@@ -266,6 +284,39 @@ public class AwsCredentials extends ExternalAccountCredentials {
     return URLEncoder.encode(token.toString(), "UTF-8");
   }
 
+  private boolean canRetrieveRegionFromEnvironment() {
+    // The AWS region can be provided through AWS_REGION or AWS_DEFAULT_REGION. Only one is
+    // required.
+    List<String> keys = ImmutableList.of(AWS_REGION, AWS_DEFAULT_REGION);
+    for (String env : keys) {
+      String value = getEnvironmentProvider().getEnv(env);
+      if (value != null && value.trim().length() > 0) {
+        // Region available.
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private boolean canRetrieveSecurityCredentialsFromEnvironment() {
+    // Check if both AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are available.
+    List<String> keys = ImmutableList.of(AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY);
+    for (String env : keys) {
+      String value = getEnvironmentProvider().getEnv(env);
+      if (value == null || value.trim().length() == 0) {
+        // Return false if one of them are missing.
+        return false;
+      }
+    }
+    return true;
+  }
+
+  @VisibleForTesting
+  boolean shouldUseMetadataServer() {
+    return !canRetrieveRegionFromEnvironment() || !canRetrieveSecurityCredentialsFromEnvironment();
+  }
+
+  @VisibleForTesting
   Map<String, Object> createMetadataRequestHeaders(AwsCredentialSource awsCredentialSource)
       throws IOException {
     Map<String, Object> metadataRequestHeaders = new HashMap<>();
@@ -302,15 +353,14 @@ public class AwsCredentials extends ExternalAccountCredentials {
 
   @VisibleForTesting
   String getAwsRegion(Map<String, Object> metadataRequestHeaders) throws IOException {
-    // For AWS Lambda, the region is retrieved through the AWS_REGION environment variable.
-    String region = getEnvironmentProvider().getEnv("AWS_REGION");
-    if (region != null) {
-      return region;
-    }
-
-    String defaultRegion = getEnvironmentProvider().getEnv("AWS_DEFAULT_REGION");
-    if (defaultRegion != null) {
-      return defaultRegion;
+    String region;
+    if (canRetrieveRegionFromEnvironment()) {
+      // For AWS Lambda, the region is retrieved through the AWS_REGION environment variable.
+      region = getEnvironmentProvider().getEnv(AWS_REGION);
+      if (region != null && region.trim().length() > 0) {
+        return region;
+      }
+      return getEnvironmentProvider().getEnv(AWS_DEFAULT_REGION);
     }
 
     if (awsCredentialSource.regionUrl == null || awsCredentialSource.regionUrl.isEmpty()) {
@@ -329,10 +379,31 @@ public class AwsCredentials extends ExternalAccountCredentials {
   AwsSecurityCredentials getAwsSecurityCredentials(Map<String, Object> metadataRequestHeaders)
       throws IOException {
     // Check environment variables for credentials first.
-    String accessKeyId = getEnvironmentProvider().getEnv("AWS_ACCESS_KEY_ID");
-    String secretAccessKey = getEnvironmentProvider().getEnv("AWS_SECRET_ACCESS_KEY");
-    String token = getEnvironmentProvider().getEnv("AWS_SESSION_TOKEN");
-    if (accessKeyId != null && secretAccessKey != null) {
+    if (canRetrieveSecurityCredentialsFromEnvironment()) {
+      String accessKeyId = getEnvironmentProvider().getEnv(AWS_ACCESS_KEY_ID);
+      String secretAccessKey = getEnvironmentProvider().getEnv(AWS_SECRET_ACCESS_KEY);
+      String token = getEnvironmentProvider().getEnv(AWS_SESSION_TOKEN);
+      return new AwsSecurityCredentials(accessKeyId, secretAccessKey, token);
+    }
+
+    // Check if AWS container credentials is available.
+    String containerCredentialsURIRelative = getEnvironmentProvider().getEnv(AWS_CONTAINER_CREDENTIALS_RELATIVE_URI);
+    if (!containerCredentialsURIRelative.equals(null)) {
+      String containerCredentialsURI = AWS_CONTAINER_CREDENTIALS_HOST + containerCredentialsURIRelative;
+      Map<String, Object> containerMetadataRequestHeaders = new HashMap<>();
+      String awsCredentials = retrieveResource(
+              containerCredentialsURI,
+              "Container Credentials",
+              containerMetadataRequestHeaders
+      );
+
+      JsonParser parser = OAuth2Utils.JSON_FACTORY.createJsonParser(awsCredentials);
+      GenericJson genericJson = parser.parseAndClose(GenericJson.class);
+
+      String accessKeyId = (String) genericJson.get("AccessKeyId");
+      String secretAccessKey = (String) genericJson.get("SecretAccessKey");
+      String token = (String) genericJson.get("Token");
+
       return new AwsSecurityCredentials(accessKeyId, secretAccessKey, token);
     }
 
@@ -355,9 +426,9 @@ public class AwsCredentials extends ExternalAccountCredentials {
     JsonParser parser = OAuth2Utils.JSON_FACTORY.createJsonParser(awsCredentials);
     GenericJson genericJson = parser.parseAndClose(GenericJson.class);
 
-    accessKeyId = (String) genericJson.get("AccessKeyId");
-    secretAccessKey = (String) genericJson.get("SecretAccessKey");
-    token = (String) genericJson.get("Token");
+    String accessKeyId = (String) genericJson.get("AccessKeyId");
+    String secretAccessKey = (String) genericJson.get("SecretAccessKey");
+    String token = (String) genericJson.get("Token");
 
     // These credentials last for a few hours - we may consider caching these in the
     // future.
@@ -405,3 +476,4 @@ public class AwsCredentials extends ExternalAccountCredentials {
     }
   }
 }
+
