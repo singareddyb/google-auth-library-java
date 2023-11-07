@@ -128,7 +128,6 @@ public class AwsCredentials extends ExternalAccountCredentials {
         this.imdsv2SessionTokenUrl = null;
       }
 
-      this.validateMetadataServerUrls();
     }
 
     private void validateMetadataServerUrls() {
